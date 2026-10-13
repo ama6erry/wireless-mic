@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Wireless Mic"
+rootProject.name = "WiMic"
 include(":app")

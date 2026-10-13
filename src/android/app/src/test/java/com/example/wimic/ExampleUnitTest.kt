@@ -1,4 +1,4 @@
-package com.example.wirelessmic
+package com.example.wimic
 
 import org.junit.Test
 
