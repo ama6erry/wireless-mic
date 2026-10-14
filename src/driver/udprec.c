@@ -16,9 +16,13 @@
 
 #define PORT 9800
 
-int main(){
-    setvbuf(stdout, NULL, _IONBF, 0);
+// Loopback port that ffplay listens on (ffplay -f s16le -ar 48000 -i udp://127.0.0.1:PLAYBACK_PORT).
+// Forwarding decoded PCM over a socket instead of stdout sidesteps Windows'
+// CRT text-mode newline translation on piped stdout, which would otherwise
+// corrupt any 0x0A byte in the raw audio stream.
+#define PLAYBACK_PORT 5555
 
+int main(){
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -43,6 +47,15 @@ int main(){
         return -1;
     }
 
+    int playback_socket;
+    struct sockaddr_in playback_addr = {.sin_family = AF_INET, .sin_port = htons(PLAYBACK_PORT)};
+    playback_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if((playback_socket = socket(AF_INET, SOCK_DGRAM, 0)) <= 0){
+        perror("Failed to create playback socket");
+        return -1;
+    }
+
     int err;
 
     socklen_t address_length = sizeof(peer_addr);
@@ -62,10 +75,12 @@ int main(){
             continue;
         }
 
-        fwrite(pcm, sizeof(int16_t), samples, stdout);
+        sendto(playback_socket, (const char*)pcm, samples * sizeof(int16_t), 0,
+               (struct sockaddr*)&playback_addr, sizeof(playback_addr));
     }
 
     closesocket(udp_rx_socket);
+    closesocket(playback_socket);
 
 #ifdef _WIN32
     WSACleanup();

@@ -9,7 +9,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-#define IP "192.168.1.10"
+#define IP "192.168.1.7"
 #define PORT 9800
 
 int opusError;
