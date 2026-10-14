@@ -1,6 +1,3 @@
 [submodule "opus"]
-	path = src/WiMic/app/src/main/cpp/third_party/opus
-	url = https://github.com/xiph/opus.git
-[submodule "src/android/app/src/main/cpp/third_party/opus"]
 	path = src/android/app/src/main/cpp/third_party/opus
 	url = https://github.com/xiph/opus.git
