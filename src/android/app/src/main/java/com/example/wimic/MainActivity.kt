@@ -9,15 +9,20 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
@@ -28,7 +33,6 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            startCapture()
             isStreaming = true
         }
     }
@@ -38,14 +42,44 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
+                var ip by remember { mutableStateOf("") }
+                var port by remember { mutableStateOf("") }
+                var err by remember { mutableStateOf(false) }
                 Surface(modifier = Modifier.fillMaxSize()) {
                     Column(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.Center,
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Button(onClick = { onStartStreamClicked() }) {
-                            Text(if (isStreaming) "Streaming…" else "Start Mic Stream")
+                        TextField(
+                            value = ip,
+                            onValueChange = {ip = it},
+                            label = {Text("IP Address")}
+                        )
+                        TextField(
+                            value = port,
+                            onValueChange = { newValue ->
+                                if(newValue.all {it.isDigit() }){
+                                    port = newValue
+                                    err = false
+                                } else {
+                                    err = true
+                                }
+                                            },
+                            label = {Text("Port")},
+                            isError = err,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                        Button(onClick = {
+                            if(isStreaming){
+                                stopCapture()
+                                isStreaming = false
+                            } else {
+                                onStartStreamClicked(ip, port.toInt())
+                            }
+
+                        }) {
+                            Text(if (isStreaming) "Stop streaming" else "Start Mic Stream")
                         }
                     }
                 }
@@ -53,7 +87,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun onStartStreamClicked() {
+    private fun onStartStreamClicked(ip : String, port : Int) {
         if (isStreaming) return
 
         val hasPermission = ContextCompat.checkSelfPermission(
@@ -61,7 +95,7 @@ class MainActivity : ComponentActivity() {
         ) == PackageManager.PERMISSION_GRANTED
 
         if (hasPermission) {
-            startCapture()
+            startCapture(ip, port)
             isStreaming = true
         } else {
             requestRecordAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
@@ -71,7 +105,8 @@ class MainActivity : ComponentActivity() {
     /**
      * Allocates the Oboe input stream and starts it. Implemented in native-lib.cpp.
      */
-    external fun startCapture()
+    external fun startCapture(ip : String, port : Int);
+    external fun stopCapture();
 
     companion object {
         // Used to load the 'wimic' library on application startup.

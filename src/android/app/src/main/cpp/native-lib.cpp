@@ -9,7 +9,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-#define IP "192.168.1.7"
+#define IP "192.168.1.10"
 #define PORT 9800
 
 int opusError;
@@ -26,7 +26,7 @@ void sendPacket(int socket, opus_int32 numBytes, const unsigned char* data){
 
 }
 
-void sender_loop(){
+void sender_loop(const char* ip, int port){
     unsigned char dataToSend[4000];
     opus_int32 numBytes;
 
@@ -35,8 +35,8 @@ void sender_loop(){
     memset(&servaddr, 0, sizeof(servaddr));
 
     servaddr.sin_family = AF_INET;
-    servaddr.sin_port = htons(PORT);
-    servaddr.sin_addr.s_addr = inet_addr(IP);
+    servaddr.sin_port = htons(port);
+    servaddr.sin_addr.s_addr = inet_addr(ip);
 
     socklen_t len = sizeof(servaddr);
 
@@ -51,10 +51,7 @@ void sender_loop(){
         int res = sendto(sockfd, dataToSend, numBytes, 0, (struct sockaddr*) &servaddr, len);
         if(res < 0){
             __android_log_print(ANDROID_LOG_INFO, "WiMicNetwork", "Failed to send packet");
-        } else {
-            __android_log_print(ANDROID_LOG_INFO, "WiMicNetwork", "Packet Sent from sender thread");
         }
-
     }
 }
 
@@ -67,15 +64,6 @@ public:
     unsigned char outputMirror[4000];
 
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream, void *audioData, int32_t numFrames) override {
-        auto *samples = static_cast<int16_t*>(audioData);
-
-        int16_t peak = 0;
-        for (int i = 0; i < numFrames; i++) {
-            int16_t abs = samples[i] < 0 ? -samples[i] : samples[i];
-            if (abs > peak) peak = abs;
-        }
-        __android_log_print(ANDROID_LOG_INFO, "WiMicAudio", "numFrames=%d peak=%d", numFrames, peak);
-
         auto *output = static_cast<int16_t*>(audioData);
 
         for(int i = 0; i < numFrames; i++){
@@ -134,7 +122,27 @@ std::thread senderThread;
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_wimic_MainActivity_startCapture(
         JNIEnv* env,
-        jobject /* this */) {
-    senderThread = std::thread(sender_loop);
+        jobject /* this */,
+        jstring ip,
+        jint port
+        ){
+    int cport = static_cast<int>(port);
+    const char* cip = env->GetStringUTFChars(ip, nullptr);
+    __android_log_print(ANDROID_LOG_INFO, "WiMicJNI", "Launching sender thread - %s:%d", cip, cport);
+    running = true;
+    senderThread = std::thread(sender_loop, cip, cport);
     currentStream = start();
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+        Java_com_example_wimic_MainActivity_stopCapture(JNIEnv * env, jobject thiz) {
+    __android_log_print(ANDROID_LOG_INFO, "WiMicJNI", "Destroying sender thread and cleaning up stream");
+    running = false;
+    senderThread.join();
+
+    if(currentStream){
+        currentStream->stop();
+        currentStream->close();
+    }
 }
