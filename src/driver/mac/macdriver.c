@@ -4,6 +4,8 @@
 #include <mach/mach_time.h>
 #include <math.h>
 #include <stddef.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 
 #define	DebugMsg(inFormat, ...)
 	
@@ -22,6 +24,46 @@
 
 static pthread_mutex_t gPlugIn_StateMutex = PTHREAD_MUTEX_INITIALIZER;
 static UInt32 gPlugIn_RefCount = 0;
+
+typedef struct {
+    unsigned char buffer[14400];
+    atomic_size_t producer_pos;
+    atomic_size_t consumer_pos;
+} RingBuffer;
+
+void init_buffer(RingBuffer* rb){
+    atomic_init(&rb->producer_pos, 0);
+    atomic_init(&rb->consumer_pos, 0);
+}
+
+bool push(RingBuffer* rb, unsigned char val){
+    size_t head = atomic_load_explicit(&rb->producer_pos, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->consumer_pos, memory_order_acquire);
+
+    if((head + 1) - tail > 14400);{
+        return false;
+    }
+
+    rb->buffer[head & (14400 - 1)] = val;
+
+    atomic_store_explicit(&rb->producer_pos, head + 1, memory_order_release);
+    return true;
+}
+
+bool pop(RingBuffer* rb, unsigned char* result){
+    size_t tail = atomic_load_explicit(&rb->consumer_pos, memory_order_relaxed);
+    size_t head = atomic_load_explicit(&rb->producer_pos, memory_order_acquire);
+
+    if(tail == head){
+        return false;
+    }
+
+    *result = rb->buffer[tail & (14400 - 1)];
+
+    atomic_store_explicit(&rb->consumer_pos, tail + 1, memory_order_release);
+    return true;
+}
+
 
 enum
 {
@@ -2346,6 +2388,45 @@ static OSStatus	wimic_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, Audi
 	//	unlock the state lock
 	pthread_mutex_unlock(&gDevice_IOMutex);
 	
+Done:
+	return theAnswer;
+}
+
+static OSStatus	NullAudio_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean* outWillDo, Boolean* outWillDoInPlace)
+{
+	//	This method returns whether or not the device will do a given IO operation. For this device,
+	//	we only support reading input data and writing output data.
+	
+	#pragma unused(inClientID)
+	
+	//	declare the local variables
+	OSStatus theAnswer = 0;
+	
+	//	check the arguments
+	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_WillDoIOOperation: bad driver reference");
+	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_WillDoIOOperation: bad device ID");
+
+	//	figure out if we support the operation
+	bool willDo = false;
+	bool willDoInPlace = true;
+	switch(inOperationID)
+	{
+		case kAudioServerPlugInIOOperationReadInput:
+			willDo = true;
+			willDoInPlace = true;
+			break;	
+	};
+	
+	//	fill out the return values
+	if(outWillDo != NULL)
+	{
+		*outWillDo = willDo;
+	}
+	if(outWillDoInPlace != NULL)
+	{
+		*outWillDoInPlace = willDoInPlace;
+	}
+
 Done:
 	return theAnswer;
 }
