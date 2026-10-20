@@ -22,7 +22,7 @@ endif
 
 SRC := udprec.c
 
-.PHONY: all run clean
+.PHONY: all run clean mac
 
 all: $(BIN)
 
@@ -32,5 +32,26 @@ $(BIN): $(SRC)
 run: $(BIN)
 	./$(BIN)
 
+# macOS HAL plug-in: builds mac/build/WiMic.driver locally. Installing it into
+# /Library/Audio/Plug-Ins/HAL/ and restarting coreaudiod is left as a manual step.
+MAC_DIR    := mac
+MAC_BUNDLE := $(MAC_DIR)/build/WiMic.driver
+MAC_BIN    := $(MAC_BUNDLE)/Contents/MacOS/WiMic
+MAC_PLIST  := $(MAC_BUNDLE)/Contents/Info.plist
+MAC_CFLAGS := -Wall -Wextra -Wno-unused-parameter -std=c11 -O2 -bundle -arch arm64 -arch x86_64
+MAC_LIBS   := -framework CoreAudio -framework CoreFoundation
+
+mac: $(MAC_BIN) $(MAC_PLIST)
+	codesign --force --sign - $(MAC_BUNDLE)
+
+$(MAC_BIN): $(MAC_DIR)/macdriver.c
+	@mkdir -p $(@D)
+	xcrun clang $(MAC_CFLAGS) $< -o $@ $(MAC_LIBS)
+
+$(MAC_PLIST): $(MAC_DIR)/Info.plist
+	@mkdir -p $(@D)
+	cp $< $@
+
 clean:
 	rm -f $(BIN)
+	rm -rf $(MAC_DIR)/build

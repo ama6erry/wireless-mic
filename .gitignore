@@ -2,3 +2,6 @@
 stream.sdp
 drv
 *.exe
+src/driver/mac/build/
+*.driver
+*.dSYM

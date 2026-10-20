@@ -1,11 +1,14 @@
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <pthread.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <mach/mach_time.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <unistd.h>
 
 #define	DebugMsg(inFormat, ...)
 	
@@ -26,7 +29,7 @@ static pthread_mutex_t gPlugIn_StateMutex = PTHREAD_MUTEX_INITIALIZER;
 static UInt32 gPlugIn_RefCount = 0;
 
 typedef struct {
-    unsigned char buffer[14400];
+    int16_t buffer[16384];
     atomic_size_t producer_pos;
     atomic_size_t consumer_pos;
 } RingBuffer;
@@ -36,21 +39,21 @@ void init_buffer(RingBuffer* rb){
     atomic_init(&rb->consumer_pos, 0);
 }
 
-bool push(RingBuffer* rb, unsigned char val){
+bool push(RingBuffer* rb, int16_t val){
     size_t head = atomic_load_explicit(&rb->producer_pos, memory_order_relaxed);
     size_t tail = atomic_load_explicit(&rb->consumer_pos, memory_order_acquire);
 
-    if((head + 1) - tail > 14400);{
+    if((head + 1) - tail > 16384){
         return false;
     }
 
-    rb->buffer[head & (14400 - 1)] = val;
+    rb->buffer[head & (16384 - 1)] = val;
 
     atomic_store_explicit(&rb->producer_pos, head + 1, memory_order_release);
     return true;
 }
 
-bool pop(RingBuffer* rb, unsigned char* result){
+bool pop(RingBuffer* rb, int16_t* result){
     size_t tail = atomic_load_explicit(&rb->consumer_pos, memory_order_relaxed);
     size_t head = atomic_load_explicit(&rb->producer_pos, memory_order_acquire);
 
@@ -58,11 +61,16 @@ bool pop(RingBuffer* rb, unsigned char* result){
         return false;
     }
 
-    *result = rb->buffer[tail & (14400 - 1)];
+    *result = rb->buffer[tail & (16384 - 1)];
 
     atomic_store_explicit(&rb->consumer_pos, tail + 1, memory_order_release);
     return true;
 }
+
+RingBuffer out_buffer;
+bool running = true;
+
+int16_t buf[4000];
 
 
 enum
@@ -148,7 +156,43 @@ static OSStatus	wimic_GetControlPropertyDataSize(AudioServerPlugInDriverRef inDr
 static OSStatus	wimic_GetControlPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, UInt32* outDataSize, void* outData);
 static OSStatus	wimic_SetControlPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, const void* inData, UInt32* outNumberPropertiesChanged, AudioObjectPropertyAddress outChangedAddresses[2]);
 
-void* networkLoop(void*);
+void* networkLoop(void* arg){
+    int udp_rx_socket;
+    struct sockaddr_in my_addr = {
+        .sin_family = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port = htons(5555)
+    };
+
+    struct sockaddr_in peer_addr;
+    socklen_t address_length = sizeof(peer_addr);
+
+    if((udp_rx_socket = socket(AF_INET, SOCK_DGRAM, 0)) <= 0){
+        perror("Failed to create socket");
+        return NULL;
+    }
+
+    int result = bind(udp_rx_socket, (const struct sockaddr *) &my_addr, sizeof(my_addr));
+
+    if(result < 0){
+        perror("Failed to bind socket");
+        return NULL;
+    }
+
+    while(running){
+        int n = recvfrom(udp_rx_socket, buf, sizeof(buf), 0, (struct sockaddr*)&peer_addr, &address_length);
+        if(n <= 0){
+            continue;
+        }
+
+        for(int i = 0; i < n / 2; i++){
+            push(&out_buffer, buf[i]);
+        }
+    }
+
+    close(udp_rx_socket);
+    return 0;
+};
 
 static AudioServerPlugInDriverInterface	gAudioServerPlugInDriverInterface =
 {
@@ -322,9 +366,15 @@ static OSStatus	wimic_Initialize(AudioServerPlugInDriverRef inDriver, AudioServe
 	theHostClockFrequency *= 1000000000.0;
 	ticksPerFrame = theHostClockFrequency / gDevice_SampleRate;
 
+    init_buffer(&out_buffer);
+
     // create thread that grabs audio data
     int err = pthread_create(&udpThread, NULL, networkLoop, NULL);
-	//TODO: Check return value of udpthread
+	
+    if(err != 0){
+        fprintf(stderr, "Failed to start network thread : %s\n", strerror(err));
+    }
+
 Done:
 	return theAnswer;
 }
@@ -2392,7 +2442,7 @@ Done:
 	return theAnswer;
 }
 
-static OSStatus	NullAudio_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean* outWillDo, Boolean* outWillDoInPlace)
+static OSStatus	wimic_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean* outWillDo, Boolean* outWillDoInPlace)
 {
 	//	This method returns whether or not the device will do a given IO operation. For this device,
 	//	we only support reading input data and writing output data.
@@ -2403,8 +2453,8 @@ static OSStatus	NullAudio_WillDoIOOperation(AudioServerPlugInDriverRef inDriver,
 	OSStatus theAnswer = 0;
 	
 	//	check the arguments
-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_WillDoIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_WillDoIOOperation: bad device ID");
+	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "wimic_WillDoIOOperation: bad driver reference");
+	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "wimic_WillDoIOOperation: bad device ID");
 
 	//	figure out if we support the operation
 	bool willDo = false;
@@ -2430,3 +2480,33 @@ static OSStatus	NullAudio_WillDoIOOperation(AudioServerPlugInDriverRef inDriver,
 Done:
 	return theAnswer;
 }
+
+static OSStatus wimic_BeginIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo){return 0;}
+
+static OSStatus wimic_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo, void* ioMainBuffer, void* ioSecondaryBuffer){
+    	
+	//	declare the local variables
+	OSStatus theAnswer = 0;
+	
+	//	check the arguments
+	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_DoIOOperation: bad driver reference");
+	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_DoIOOperation: bad device ID");
+
+    if(inOperationID == kAudioServerPlugInIOOperationReadInput){
+        int16_t result;
+        bool succeeded;
+        for(UInt32 i = 0; i < inIOBufferFrameSize; i++){
+             succeeded = pop(&out_buffer, &result);
+             if(!succeeded){
+                result = 0.0f;
+             }
+            ((Float32*)ioMainBuffer)[i] = result / 32768.0f; //Scale down values to -1.0 - +1.0 as needed by HAL
+            
+        }
+    }
+Done:
+    return theAnswer;
+
+}
+
+static OSStatus wimic_EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo){return 0;}
