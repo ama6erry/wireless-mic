@@ -22,6 +22,18 @@
 // corrupt any 0x0A byte in the raw audio stream.
 #define PLAYBACK_PORT 5555
 
+#pragma pack(push, 1)
+
+typedef struct{
+    uint8_t vpxcc;
+    uint8_t m_pt;
+    uint16_t seq_num;
+    uint32_t timestamp;
+    uint32_t ssrc;
+} RTPHeader;
+
+#pragma pack(pop)
+
 int main(){
 #ifdef _WIN32
     WSADATA wsaData;
@@ -62,6 +74,16 @@ int main(){
     OpusDecoder *dec = opus_decoder_create(48000, 1, &err);
     unsigned char buf[4000];
     int16_t pcm[960];
+    RTPHeader rtp;
+    uint16_t seq_num;
+    uint16_t expected_seq;
+    uint32_t timestamp;
+
+    int16_t gap;
+
+    int first = 1;
+
+    int samples;
 
     while (1) {
         int n = recvfrom(udp_rx_socket, buf, sizeof(buf), 0, (struct sockaddr*)&peer_addr, &address_length);
@@ -69,7 +91,35 @@ int main(){
             continue;
         }
 
-        int samples = opus_decode(dec, buf, n, pcm, 960, 0);
+        memcpy(&rtp, buf, 12);
+        seq_num = ntohs(rtp.seq_num);
+        if(first){ expected_seq = seq_num; first = 0; }
+        timestamp = ntohl(rtp.timestamp);
+
+        gap = (int16_t)(seq_num - expected_seq);
+
+        if(gap > 200 || gap < -200){
+            printf("Resyncing gap.. \n");
+            gap = 0;
+        }
+
+        if(gap > 0){ //1 or more packets lost
+            printf("%d packet(s) lost\n", gap);
+            for(int i = 0; i < gap; i++){
+                samples = opus_decode(dec, NULL, 0, pcm, 960, 0);
+                if (samples < 0) {
+                    fprintf(stderr, "opus_decode error: %s\n", opus_strerror(samples));
+                    continue;
+                }
+                sendto(playback_socket, (const char*)pcm, samples * sizeof(int16_t), 0, (struct sockaddr*)&playback_addr, sizeof(playback_addr));
+            }
+        } else if(gap < 0){
+            continue;
+        }
+        
+        expected_seq = seq_num + 1;
+
+        samples = opus_decode(dec, buf + 12, n - 12, pcm, 960, 0);
         if (samples < 0) {
             fprintf(stderr, "opus_decode error: %s\n", opus_strerror(samples));
             continue;

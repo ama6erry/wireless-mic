@@ -12,6 +12,18 @@
 #define IP "192.168.1.10"
 #define PORT 9800
 
+#pragma pack(push, 1)
+
+typedef struct{
+    uint8_t vpxcc;
+    uint8_t m_pt;
+    uint16_t seq_num;
+    uint32_t timestamp;
+    uint32_t ssrc;
+} RTPHeader;
+
+#pragma pack(pop)
+
 int opusError;
 OpusEncoder *encoder = opus_encoder_create(48000, 1, OPUS_APPLICATION_VOIP, &opusError);
 
@@ -21,10 +33,6 @@ std::condition_variable bufferCV;
 bool running = true;
 bool frameReady = false;
 opus_int32 bytes_encoded;
-
-void sendPacket(int socket, opus_int32 numBytes, const unsigned char* data){
-
-}
 
 void sender_loop(const char* ip, int port){
     unsigned char dataToSend[4000];
@@ -40,6 +48,16 @@ void sender_loop(const char* ip, int port){
 
     socklen_t len = sizeof(servaddr);
 
+    RTPHeader rtp;
+    rtp.vpxcc = 0x80;
+    rtp.m_pt = 0x6F;
+    // below values are uninitialised on purpose (they can be random at the start)
+    uint32_t rtp_timestamp;
+    uint32_t rtp_ssrc;
+    uint16_t rtp_seq;
+
+    rtp.ssrc = htonl(rtp_ssrc);
+
     while(running){
         std::unique_lock lock(output_buffer_mut);
         bufferCV.wait(lock, [] {return frameReady || !running; });
@@ -48,9 +66,17 @@ void sender_loop(const char* ip, int port){
         frameReady = false;
         numBytes = bytes_encoded;
         output_buffer_mut.unlock();
-        int res = sendto(sockfd, dataToSend, numBytes, 0, (struct sockaddr*) &servaddr, len);
+        rtp.timestamp = htonl(rtp_timestamp);
+        rtp.seq_num = htons(rtp_seq++);
+        rtp_timestamp += 960;
+
+        uint8_t packet[12 + sizeof(outputBuffer)];
+        memcpy(packet, &rtp, 12);
+        memcpy(packet + 12, dataToSend, numBytes);
+
+        int res = sendto(sockfd, packet, numBytes + 12, 0, (struct sockaddr*) &servaddr, len);
         if(res < 0){
-            __android_log_print(ANDROID_LOG_INFO, "WiMicNetwork", "Failed to send packet");
+            __android_log_print(ANDROID_LOG_ERROR, "WiMicNetwork", "Failed to send packet");
         }
     }
 }
