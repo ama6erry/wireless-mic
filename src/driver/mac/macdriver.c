@@ -67,6 +67,13 @@ bool pop(RingBuffer* rb, int16_t* result){
     return true;
 }
 
+void flush(RingBuffer* rb){
+	size_t head = atomic_load_explicit(&rb->producer_pos, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->consumer_pos, memory_order_acquire);
+
+	atomic_store_explicit(&rb->producer_pos, tail, memory_order_release);
+}
+
 RingBuffer out_buffer;
 bool running = true;
 
@@ -156,6 +163,8 @@ static OSStatus	wimic_GetControlPropertyDataSize(AudioServerPlugInDriverRef inDr
 static OSStatus	wimic_GetControlPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, UInt32* outDataSize, void* outData);
 static OSStatus	wimic_SetControlPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, const void* inData, UInt32* outNumberPropertiesChanged, AudioObjectPropertyAddress outChangedAddresses[2]);
 
+#define FLUSH_THRESHOLD 2 * 16384
+
 void* networkLoop(void* arg){
     int udp_rx_socket;
     struct sockaddr_in my_addr = {
@@ -179,13 +188,29 @@ void* networkLoop(void* arg){
         return NULL;
     }
 
+	static uint32_t last_timestamp = 0;
+	static int first_packet = 1;
+
     while(running){
         int n = recvfrom(udp_rx_socket, buf, sizeof(buf), 0, (struct sockaddr*)&peer_addr, &address_length);
         if(n <= 0){
             continue;
         }
 
+		uint32_t timestamp;
+		memcpy(&timestamp, buf, sizeof(uint32_t));
+
+		if(!first_packet){
+			int32_t delta = (int32_t)(timestamp - last_timestamp);
+			if(delta < 0 || delta > FLUSH_THRESHOLD){
+				flush(&out_buffer);
+			}
+		}
+		first_packet = 0;
+		last_timestamp = timestamp;
+
         for(int i = 0; i < n / 2; i++){
+			if(i < 2) continue;
             push(&out_buffer, buf[i]);
         }
     }
@@ -2500,8 +2525,7 @@ static OSStatus wimic_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioOb
              if(!succeeded){
                 result = 0.0f;
              }
-            ((Float32*)ioMainBuffer)[i] = result / 32768.0f; //Scale down values to -1.0 - +1.0 as needed by HAL
-            
+            ((Float32*)ioMainBuffer)[i] = result / 32768.0f; //Scale down values to -1.0 - +1.0 as needed by HAL    
         }
     }
 Done:

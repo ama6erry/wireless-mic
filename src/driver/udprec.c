@@ -11,15 +11,13 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <errno.h>
 #define closesocket close
 #endif
 
 #define PORT 9800
 
-// Loopback port that ffplay listens on (ffplay -f s16le -ar 48000 -i udp://127.0.0.1:PLAYBACK_PORT).
-// Forwarding decoded PCM over a socket instead of stdout sidesteps Windows'
-// CRT text-mode newline translation on piped stdout, which would otherwise
-// corrupt any 0x0A byte in the raw audio stream.
 #define PLAYBACK_PORT 5555
 
 #pragma pack(push, 1)
@@ -34,6 +32,28 @@ typedef struct{
 
 #pragma pack(pop)
 
+int udp_rx_socket;
+struct sockaddr_in peer_addr;
+int playback_socket;
+struct sockaddr_in playback_addr;
+
+ssize_t send_frame(int16_t* pcm, uint32_t timestamp, int samples){
+    char* out = malloc((samples * sizeof(int16_t)) + sizeof(uint32_t));
+    if(out == NULL) {fprintf(stderr, "Failed to allocate frame memory\n"); return -1;}
+
+    memcpy(out, &timestamp, sizeof(uint32_t));
+    memcpy(out + 4, pcm, sizeof(int16_t) * samples);
+
+    ssize_t res = sendto(playback_socket, out, (samples * sizeof(int16_t)) + sizeof(uint32_t), 0, (struct sockaddr*)&playback_addr, sizeof(playback_addr));
+
+    if(res < 0){
+        fprintf(stderr, "Failed to send loopback packet : %s\n", strerror(errno));
+    }
+
+    free(out);
+    return res;
+}
+
 int main(){
 #ifdef _WIN32
     WSADATA wsaData;
@@ -43,8 +63,7 @@ int main(){
     }
 #endif
 
-    int udp_rx_socket;
-    struct sockaddr_in peer_addr;
+    
     struct sockaddr_in my_addr = {.sin_family = AF_INET, .sin_addr.s_addr = INADDR_ANY, .sin_port = htons(PORT)};
 
     if((udp_rx_socket = socket(AF_INET, SOCK_DGRAM, 0)) <= 0){
@@ -59,8 +78,9 @@ int main(){
         return -1;
     }
 
-    int playback_socket;
-    struct sockaddr_in playback_addr = {.sin_family = AF_INET, .sin_port = htons(PLAYBACK_PORT)};
+
+    playback_addr.sin_family = AF_INET;
+    playback_addr.sin_port = htons(PLAYBACK_PORT);
     playback_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     if((playback_socket = socket(AF_INET, SOCK_DGRAM, 0)) <= 0){
@@ -78,6 +98,7 @@ int main(){
     uint16_t seq_num;
     uint16_t expected_seq;
     uint32_t timestamp;
+    uint32_t out_timestamp;
 
     int16_t gap;
 
@@ -95,7 +116,7 @@ int main(){
         seq_num = ntohs(rtp.seq_num);
         if(first){ expected_seq = seq_num; first = 0; }
         timestamp = ntohl(rtp.timestamp);
-
+        out_timestamp = timestamp;
         gap = (int16_t)(seq_num - expected_seq);
 
         if(gap > 200 || gap < -200){
@@ -111,7 +132,8 @@ int main(){
                     fprintf(stderr, "opus_decode error: %s\n", opus_strerror(samples));
                     continue;
                 }
-                sendto(playback_socket, (const char*)pcm, samples * sizeof(int16_t), 0, (struct sockaddr*)&playback_addr, sizeof(playback_addr));
+                out_timestamp += 960;
+                send_frame(pcm, out_timestamp, samples);
             }
         } else if(gap < 0){
             continue;
@@ -125,8 +147,9 @@ int main(){
             continue;
         }
 
-        sendto(playback_socket, (const char*)pcm, samples * sizeof(int16_t), 0,
-               (struct sockaddr*)&playback_addr, sizeof(playback_addr));
+        out_timestamp += 960;
+
+        send_frame(pcm, out_timestamp, samples);
     }
 
     closesocket(udp_rx_socket);
